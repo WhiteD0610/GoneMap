@@ -253,7 +253,7 @@ const GAS_URL = 'https://script.google.com/macros/s/AKfycbx-j4R2WvIbrPzmpcMo2XtK
 // 同期の合言葉（GAS側の SYNC_KEY と同じ文字列に。全端末で共通）
 const SYNC_KEY = '109344';
 // アルバムアプリ（album.html）の場所。別リポジトリなら完全なURLを書く
-const ALBUM_URL = 'album.html';
+const ALBUM_URL = 'https://whited0610.github.io/Albu/';
 // ================================================================
 
 /* ===================== 定数 ===================== */
@@ -280,6 +280,7 @@ const openDB = () => new Promise((res,rej)=>{
 const store = m => db.transaction('places',m).objectStore('places');
 const dbAll = () => new Promise(r=>{ const q=store('readonly').getAll(); q.onsuccess=()=>r(q.result||[]); q.onerror=()=>r([]); });
 const dbPut = o => new Promise((r,j)=>{ const q=store('readwrite').put(o); q.onsuccess=()=>r(); q.onerror=()=>j(q.error); });
+const dbDel = id => new Promise(r=>{ const q=store('readwrite').delete(id); q.onsuccess=()=>r(); q.onerror=()=>r(); });
 
 /* ===================== 状態 ===================== */
 let map, markerLayer, all = [], places = [], markers = {}, urlCache = {};
@@ -800,6 +801,11 @@ async function sync(){
     let n=0;
     for(const c of (res.changes||[])){
       const local = all.find(x=>x.id===c.id);
+      if(c.deleted){                       // 他端末で消された記録は端末からも削除
+        if(local && local.dirty && local.updatedAt > +c.updatedAt) continue;
+        if(local){ await dbDel(c.id); dropUrl(c.id); all = all.filter(x=>x.id!==c.id); n++; }
+        continue;
+      }
       if(local && local.updatedAt >= +c.updatedAt) continue;
       const rec={id:c.id,name:c.name,cat:c.cat,date:c.date,memo:c.memo,lat:+c.lat,lng:+c.lng,
         photoId:c.photoId||null, thumb: await d2b(c.thumb), mapUrl:c.mapUrl||'',
@@ -810,6 +816,9 @@ async function sync(){
     }
     for(const p of dirty){ const cur=all.find(x=>x.id===p.id);
       if(cur && cur.dirty && cur.updatedAt===p.updatedAt && !(cur.photo && !cur.photoId && (cur.photoFail||0)<2)){ cur.dirty=false; await dbPut(cur); } }
+    // 送信済みの削除は端末側からも実体を消す
+    for(const p of all.filter(x=>x.deleted && !x.dirty)){ await dbDel(p.id); dropUrl(p.id); }
+    all = all.filter(x=>!(x.deleted && !x.dirty));
     localStorage.setItem('pm_since', res.serverTime);
     localStorage.setItem('pm_synced', Date.now());
     refresh(); setSync('ok','');
