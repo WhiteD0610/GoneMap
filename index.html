@@ -70,12 +70,15 @@ header{position:absolute;top:0;left:0;right:var(--panel);z-index:600;
 .mask{position:absolute;inset:0;background:rgba(0,0,0,.35);z-index:700;display:none}
 .mask.show{display:block}
 .sheet{position:absolute;left:0;right:0;bottom:0;z-index:750;background:var(--card);
-  border-radius:20px 20px 0 0;transform:translateY(102%);transition:transform .26s cubic-bezier(.22,.8,.3,1);
-  max-height:88%;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
-.sheet.show{transform:translateY(0)}
-.grip{width:38px;height:5px;background:#d1d1d6;border-radius:3px;margin:8px auto 4px;flex:0 0 auto}
+  border-radius:20px 20px 0 0;transform:translateY(103%);
+  transition:transform .26s cubic-bezier(.22,.8,.3,1),visibility .26s;
+  visibility:hidden;pointer-events:none;
+  max-height:72%;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
+.sheet.show{transform:translateY(0);visibility:visible;pointer-events:auto}
+.grip{width:44px;height:5px;background:#d1d1d6;border-radius:3px;margin:9px auto 4px;flex:0 0 auto;cursor:pointer}
 .sheet .body{overflow:auto;-webkit-overflow-scrolling:touch;padding:6px 16px 22px}
-.sheet h2{font-size:18px;margin:6px 0 14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.sheet h2{font-size:18px;margin:0 0 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;
+  position:sticky;top:0;background:var(--card);padding:6px 0 10px;z-index:3}
 .closeX{border:0;background:#e9e9ee;border-radius:14px;width:28px;height:28px;font-size:15px;cursor:pointer;color:var(--sub);flex:0 0 28px}
 
 label{display:block;font-size:12px;color:var(--sub);margin:14px 0 6px}
@@ -184,7 +187,10 @@ textarea{min-height:76px;resize:vertical}
   <input type="date" id="fDate">
   <label>メモ</label>
   <textarea id="fMemo" placeholder="食べたもの、感想、また行きたいか など"></textarea>
-  <div class="row"><button class="btn sub" id="fPos">位置を選び直す</button></div>
+  <label>GoogleマップのURL（登録すると詳細から直接開けます）</label>
+  <input type="text" id="fMapUrl" placeholder="https://maps.app.goo.gl/… を貼り付け">
+  <div class="row"><button class="btn sub" id="fFromUrl">このURLから位置を取り込む</button></div>
+  <div class="row"><button class="btn sub" id="fPos">地図で位置を選び直す</button></div>
   <div class="row"><button class="btn" id="fSave">保存する</button></div>
 </div></div>
 
@@ -196,6 +202,7 @@ textarea{min-height:76px;resize:vertical}
   <div class="meta"><span class="badge" id="dCat"></span><span id="dDate"></span></div>
   <div id="dMemo"></div>
   <div class="row">
+    <button class="btn sub" id="dMap">マップで開く</button>
     <button class="btn sub" id="dRoute">経路</button>
     <button class="btn sub" id="dEdit">編集</button>
   </div>
@@ -271,12 +278,25 @@ const dbPut = o => new Promise((r,j)=>{ const q=store('readwrite').put(o); q.ons
 
 /* ===================== 状態 ===================== */
 let map, markerLayer, all = [], places = [], markers = {}, urlCache = {};
-let editId=null, detailId=null, selectedId=null, pendingName='';
+let editId=null, detailId=null, selectedId=null, pendingName='', pendingUrl='';
 let pendingPos=null, pendingPhoto=null, pendingThumb=null, pickResolve=null, curCat='food', filterCat='';
 
 /* ===================== 起動 ===================== */
 (async function init(){
-  try{ db = await openDB(); }catch(e){ alert('保存領域を開けませんでした: '+e); return; }
+  try{ db = await openDB(); }catch(e){
+    const local = location.protocol === 'file:';
+    alert(
+      '保存領域（IndexedDB）を開けませんでした。\n\n' +
+      (local
+        ? 'ファイルを直接開いている（file://）ため、ブラウザに拒否されています。\n' +
+          '次のどちらかで開き直してください。\n' +
+          '  ・このフォルダで  python -m http.server 8802  を実行し、http://localhost:8802/ を開く\n' +
+          '  ・GitHub Pages などに置いて https:// で開く'
+        : 'シークレットウィンドウ、サイトデータのブロック設定、または sandbox 付き iframe 内で\n' +
+          '開かれている可能性があります。通常のウィンドウで開き直してください。') +
+      '\n\n詳細: ' + e);
+    return;
+  }
   const saved = JSON.parse(localStorage.getItem('pm_view')||'null');
   map = L.map('map',{zoomControl:isPC()}).setView(saved?saved.c:[35.681,139.767], saved?saved.z:14);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
@@ -328,8 +348,30 @@ function closeSheets(keepPanel){
   mask.classList.remove('show'); sheets.forEach(s=>s.classList.remove('show'));
   if(!keepPanel){ document.body.classList.remove('panelopen'); setTimeout(()=>map.invalidateSize({pan:false}),290); }
 }
-mask.onclick = ()=>{ closeSheets(); clearSel(); };
-document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{ closeSheets(); clearSel(); });
+function closeAll(){
+  if(pickResolve) endPick(null);
+  closeSheets(); clearSel();
+}
+mask.onclick = closeAll;
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeAll);
+document.querySelectorAll('.grip').forEach(g=>g.onclick=closeAll);
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeAll(); });
+// シートの外側（地図など）を触ったら閉じる
+document.addEventListener('pointerdown', e=>{
+  if(!document.querySelector('.sheet.show')) return;
+  if(e.target.closest('.sheet,header,.fab,.locbtn,#pickbar')) return;
+  closeAll();
+}, true);
+// 下方向スワイプで閉じる
+sheets.forEach(s=>{
+  let y0=null;
+  s.addEventListener('touchstart', e=>{ y0 = s.querySelector('.body').scrollTop<=0 ? e.touches[0].clientY : null; },{passive:true});
+  s.addEventListener('touchmove', e=>{
+    if(y0===null) return;
+    if(e.touches[0].clientY - y0 > 70){ y0=null; closeAll(); }
+  },{passive:true});
+  s.addEventListener('touchend', ()=>{ y0=null; },{passive:true});
+});
 function clearSel(){ if(selectedId){ selectedId=null; render(); } }
 function toast(t){ const e=document.getElementById('toast'); e.textContent=t; e.classList.add('show');
   clearTimeout(e._t); e._t=setTimeout(()=>e.classList.remove('show'),2600); }
@@ -371,6 +413,14 @@ function nameFromMapsUrl(text){
   try{ const m = decodeURIComponent(text).match(/\/maps\/place\/([^\/@?]+)/);
        return m ? m[1].replace(/\+/g,' ').trim() : ''; }catch(_){ return ''; }
 }
+function queryName(u){
+  try{
+    const m = decodeURIComponent(u).match(/[?&](?:q|query)=([^&]+)/);
+    if(!m) return '';
+    const v = m[1].replace(/\+/g,' ').trim();
+    return /^-?\d+\.\d+/.test(v) ? '' : v;
+  }catch(_){ return ''; }
+}
 async function geocode(q, say){
   try{
     const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&q=${encodeURIComponent(q)}`);
@@ -386,16 +436,17 @@ async function resolvePlace(text, log){
   let hit = parseCoords(t), name = nameFromMapsUrl(t);
   if(hit) return {...hit, name};
 
-  if(/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs)/.test(t)){
+  if(/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl|g\.co|share\.google|maps\.google\.[a-z.]+|www\.google\.[a-z.]+)\//.test(t)){
     if(!GAS_URL){ say('短縮リンクの展開にはGAS（同期用）の設定が必要です。Googleマップでその場所を開き、アドレスバーの長いURL（/@35.6…,139.7… を含む）を貼ってください。'); return null; }
     say('リンクを展開中…');
     try{
       const r = await api('resolve',{url:t});
-      hit = parseCoords(r.url||'') || (r.lat ? {lat:+r.lat,lng:+r.lng} : null);
-      name = name || nameFromMapsUrl(r.url||'');
+      const u = r.url||'';
+      hit = (r.lat!=null ? {lat:+r.lat,lng:+r.lng} : null) || parseCoords(u);
+      name = name || nameFromMapsUrl(u) || queryName(u) || (r.title||'');
       if(hit) return {...hit, name};
-      if(name){ say('座標が取れなかったので名前で検索します…'); return await geocode(name, say); }
-      say('この短縮リンクからは場所を特定できませんでした。');
+      if(name){ say('座標が取れないため「'+name+'」で検索します…'); return await geocode(name, say); }
+      say('展開先: '+(u||'不明')+'\nここから場所を特定できませんでした。Googleマップで開き直し、共有→「リンクをコピー」ではなくアドレスバーのURL（/@35.6…,139.7… を含む）を貼ってください。');
       return null;
     }catch(e){ say('展開に失敗しました: '+e.message); return null; }
   }
@@ -412,6 +463,7 @@ document.getElementById('pasteGo').onclick = async ()=>{
   closeSheets();
   map.setView([r.lat,r.lng],18);
   pendingName = r.name||'';
+  pendingUrl = /^https?:\/\//.test(t) ? t : '';
   if(wasPicking){
     document.getElementById('cross').classList.add('show');
     document.getElementById('pickbar').classList.add('show');
@@ -432,6 +484,7 @@ async function startAddAt(pos){
   document.getElementById('formTitle').textContent='場所を記録';
   document.getElementById('fName').value = pendingName||''; pendingName='';
   document.getElementById('fMemo').value='';
+  document.getElementById('fMapUrl').value = pendingUrl||''; pendingUrl='';
   document.getElementById('fDate').value = new Date().toISOString().slice(0,10);
   setCat('food'); setPhotoPreview(null);
   openSheet(document.getElementById('sheetForm'));
@@ -478,6 +531,18 @@ async function resize(file,max,q){
   cv.getContext('2d').drawImage(bmp,0,0,w,h); bmp.close&&bmp.close();
   return await new Promise(r=>cv.toBlob(r,'image/jpeg',q));
 }
+document.getElementById('fFromUrl').onclick = async ()=>{
+  const t = document.getElementById('fMapUrl').value.trim();
+  if(!t){ toast('URLを貼り付けてください'); return; }
+  toast('URLを解析中…');
+  const r = await resolvePlace(t, toast);
+  if(!r) return;
+  pendingPos = {lat:r.lat, lng:r.lng};
+  const nm = document.getElementById('fName');
+  if(!nm.value && r.name) nm.value = r.name;
+  map.setView([r.lat,r.lng],18);
+  toast('位置を取り込みました');
+};
 document.getElementById('fPos').onclick = async ()=>{
   document.getElementById('pickMsg').textContent='位置を合わせ直してください';
   const p = await pickPosition(pendingPos?[pendingPos.lat,pendingPos.lng]:null);
@@ -498,6 +563,7 @@ document.getElementById('fSave').onclick = async ()=>{
     photo: pendingPhoto || (base?base.photo:null),
     thumb: pendingThumb || (base?base.thumb:null),
     photoId: pendingPhoto ? null : (base?base.photoId:null),
+    mapUrl: document.getElementById('fMapUrl').value.trim(),
     deleted:false, updatedAt:Date.now(), dirty:true
   };
   try{ await dbPut(rec); }catch(e){ toast('保存できませんでした（容量不足かも）'); return; }
@@ -537,6 +603,7 @@ document.getElementById('dEdit').onclick = ()=>{
   document.getElementById('formTitle').textContent='記録を編集';
   document.getElementById('fName').value=p.name;
   document.getElementById('fMemo').value=p.memo||'';
+  document.getElementById('fMapUrl').value=p.mapUrl||'';
   document.getElementById('fDate').value=p.date||'';
   setCat(p.cat); setPhotoPreview(p.thumb?urlFor(p):null);
   openSheet(document.getElementById('sheetForm'));
@@ -548,6 +615,10 @@ document.getElementById('dDel').onclick = async ()=>{
   await dbPut(p); dropUrl(p.id);
   selectedId=null; closeSheets(); refresh(); toast('削除しました');
   if(GAS_URL) sync();
+};
+document.getElementById('dMap').onclick = ()=>{
+  const p = all.find(x=>x.id===detailId); if(!p) return;
+  window.open(p.mapUrl || `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lng}`,'_blank');
 };
 document.getElementById('dRoute').onclick = ()=>{
   const p = all.find(x=>x.id===detailId); if(!p) return;
@@ -586,6 +657,7 @@ q.addEventListener('keydown', async e=>{
     toast('場所を解析中…');
     const r = await resolvePlace(t, toast);
     if(r){ map.setView([r.lat,r.lng],18); pendingName=r.name||'';
+           pendingUrl = /^https?:\/\//.test(t) ? t : '';
            toast((r.name||'指定の位置')+'を表示。＋ボタンで記録できます'); }
     return;
   }
@@ -642,7 +714,7 @@ async function sync(){
     }
     const payload=[];
     for(const p of dirty) payload.push({id:p.id,name:p.name,cat:p.cat,date:p.date,memo:p.memo,
-      lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:(await b2d(p.thumb))||'',
+      lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:(await b2d(p.thumb))||'',mapUrl:p.mapUrl||'',
       updatedAt:p.updatedAt,deleted:!!p.deleted});
     const since=+localStorage.getItem('pm_since')||0;
     let res=null;
@@ -659,7 +731,7 @@ async function sync(){
       const local = all.find(x=>x.id===c.id);
       if(local && local.updatedAt >= +c.updatedAt) continue;
       const rec={id:c.id,name:c.name,cat:c.cat,date:c.date,memo:c.memo,lat:+c.lat,lng:+c.lng,
-        photoId:c.photoId||null, thumb: await d2b(c.thumb),
+        photoId:c.photoId||null, thumb: await d2b(c.thumb), mapUrl:c.mapUrl||'',
         photo:(local && local.photoId && local.photoId===c.photoId)?local.photo:null,
         deleted:!!c.deleted, updatedAt:+c.updatedAt, dirty:false};
       await dbPut(rec); dropUrl(rec.id);
