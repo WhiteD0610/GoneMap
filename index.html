@@ -115,7 +115,7 @@ textarea{min-height:76px;resize:vertical}
 .empty{text-align:center;color:var(--sub);padding:48px 0;font-size:14px}
 .menuItem{width:100%;text-align:left;background:#fff;border:0;border-bottom:1px solid var(--line);
   padding:16px 4px;font-size:16px;font-family:inherit;color:var(--text);cursor:pointer}
-.note{font-size:12px;color:var(--sub);line-height:1.7}
+.note{font-size:12px;color:var(--sub);line-height:1.7;white-space:pre-wrap;word-break:break-all}
 .toast{position:absolute;left:50%;bottom:calc(var(--safe-b) + 100px);transform:translateX(-50%);
   background:rgba(0,0,0,.82);color:#fff;padding:10px 18px;border-radius:20px;font-size:14px;z-index:900;
   opacity:0;transition:opacity .2s;pointer-events:none;max-width:86%;text-align:center}
@@ -230,7 +230,9 @@ textarea{min-height:76px;resize:vertical}
 <!-- メニュー -->
 <div class="sheet" id="sheetMenu"><div class="grip"></div><div class="body">
   <h2><span>メニュー</span><button class="closeX" data-close>✕</button></h2>
+  <button class="menuItem" id="mAlbum">📖 アルバムで見る</button>
   <button class="menuItem" id="mSync">今すぐ同期する</button>
+  <button class="menuItem" id="mPing">接続を確認する</button>
   <button class="menuItem" id="mExport">バックアップを書き出す（.json）</button>
   <button class="menuItem" id="mImport">バックアップを読み込む</button>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
@@ -250,6 +252,8 @@ textarea{min-height:76px;resize:vertical}
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxd8Yh-H20xPp2Y_cTdQ4XCOZAbEOvWGZqSTgjCwYOMb1VSLIgcCrh5Kj0koQ1Ac0XcGw/exec';
 // 同期の合言葉（GAS側の SYNC_KEY と同じ文字列に。全端末で共通）
 const SYNC_KEY = '109344';
+// アルバムアプリ（album.html）の場所。別リポジトリなら完全なURLを書く
+const ALBUM_URL = 'album.html';
 // ================================================================
 
 /* ===================== 定数 ===================== */
@@ -715,12 +719,22 @@ document.getElementById('btnLoc').onclick = ()=>{
 /* ===================== 同期 ===================== */
 const b2d = b => b ? new Promise(r=>{const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(b);}) : Promise.resolve(null);
 const d2b = async d => d ? await (await fetch(d)).blob() : null;
-async function api(action, payload){
-  const r = await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
-    body:JSON.stringify({key:SYNC_KEY,action,...payload})});
-  const j = await r.json();
-  if(!j.ok) throw new Error(j.error||'不明なエラー');
-  return j;
+async function api(action, payload, ms){
+  const ac = new AbortController();
+  const to = setTimeout(()=>ac.abort(), ms || 30000);
+  try{
+    const r = await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({key:SYNC_KEY,action,...payload}), signal:ac.signal});
+    const txt = await r.text();
+    let j;
+    try{ j = JSON.parse(txt); }
+    catch(_){ throw new Error('応答がJSONではありません（HTTP '+r.status+'）。デプロイのアクセス権を「全員」にしてください'); }
+    if(!j.ok) throw new Error(j.error||'不明なエラー');
+    return j;
+  }catch(e){
+    if(e.name==='AbortError') throw new Error('応答がありません（タイムアウト）');
+    throw e;
+  }finally{ clearTimeout(to); }
 }
 function setSync(s,msg){
   document.getElementById('syncDot').className = s;
@@ -734,22 +748,31 @@ function updateSyncInfo(){
   el.textContent = (t?`最終同期: ${new Date(t).toLocaleString('ja-JP')}`:'未同期') + ' ' + (localStorage.getItem('pm_syncmsg')||'');
 }
 let syncing=false;
+const PHOTOS_PER_SYNC = 3;     // 1回の同期で送る写真の最大枚数（詰まり防止）
 async function sync(){
   if(!GAS_URL || syncing) return;
-  syncing=true; setSync('busy','');
+  syncing=true; setSync('busy','通信中…');
   try{
     all = await dbAll();
     const dirty = all.filter(p=>p.dirty);
-    for(const p of dirty){                      // 写真は先にDriveへ
-      if(p.photo && !p.photoId){
-        const r = await api('photo_put',{id:p.id, data: await b2d(p.photo)});
-        p.photoId = r.fileId; await dbPut(p);
-      }
+    // 写真を先にDriveへ（重いので分割）
+    const needUp = dirty.filter(p=>p.photo && !p.photoId);
+    const upNow = needUp.slice(0, PHOTOS_PER_SYNC);
+    for(let i=0;i<upNow.length;i++){
+      const p = upNow[i];
+      setSync('busy',`写真を送信中 ${i+1}/${upNow.length}`);
+      toast(`写真を送信中 ${i+1}/${upNow.length}`);
+      const r = await api('photo_put',{id:p.id, data: await b2d(p.photo)}, 60000);
+      p.photoId = r.fileId; await dbPut(p);
     }
+    setSync('busy','記録を送信中…');
     const payload=[];
-    for(const p of dirty) payload.push({id:p.id,name:p.name,cat:p.cat,date:p.date,memo:p.memo,
-      lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:(await b2d(p.thumb))||'',mapUrl:p.mapUrl||'',
-      updatedAt:p.updatedAt,deleted:!!p.deleted});
+    for(const p of dirty){
+      if(p.photo && !p.photoId) continue;      // 写真未送信の分は次回まわし
+      payload.push({id:p.id,name:p.name,cat:p.cat,date:p.date,memo:p.memo,
+        lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:(await b2d(p.thumb))||'',mapUrl:p.mapUrl||'',
+        updatedAt:p.updatedAt,deleted:!!p.deleted});
+    }
     const since=+localStorage.getItem('pm_since')||0;
     let res=null;
     if(payload.length){
@@ -772,13 +795,16 @@ async function sync(){
       const i=all.findIndex(x=>x.id===rec.id); if(i>=0) all[i]=rec; else all.push(rec); n++;
     }
     for(const p of dirty){ const cur=all.find(x=>x.id===p.id);
-      if(cur && cur.dirty && cur.updatedAt===p.updatedAt){ cur.dirty=false; await dbPut(cur); } }
+      if(cur && cur.dirty && cur.updatedAt===p.updatedAt && !(cur.photo && !cur.photoId)){ cur.dirty=false; await dbPut(cur); } }
     localStorage.setItem('pm_since', res.serverTime);
     localStorage.setItem('pm_synced', Date.now());
     refresh(); setSync('ok','');
     if(n) toast(`${n}件を他の端末から受信しました`);
+    const rest = (await dbAll()).filter(p=>p.dirty).length;
+    if(rest){ setSync('busy',`残り${rest}件を送信中…`); syncing=false; setTimeout(sync, 800); return; }
   }catch(e){
     setSync('ng','エラー: '+e.message); console.warn('sync failed',e);
+    toast('同期に失敗: '+e.message);
   }finally{ syncing=false; }
 }
 document.getElementById('btnSync').onclick = ()=>{
@@ -792,6 +818,20 @@ document.getElementById('mSync').onclick = ()=>{
 
 /* ===================== メニュー / バックアップ ===================== */
 document.getElementById('btnMenu').onclick = ()=>{ updateSyncInfo(); openSheet(document.getElementById('sheetMenu')); };
+document.getElementById('mPing').onclick = async ()=>{
+  const el = document.getElementById('syncInfo');
+  if(!GAS_URL){ el.textContent = 'GAS_URL が空です。コード冒頭に /exec URL を貼ってください。'; return; }
+  el.textContent = '接続を確認しています…';
+  const t0 = Date.now();
+  try{
+    const r = await api('ping',{},15000);
+    el.textContent = `接続OK（${Date.now()-t0}ms）／サーバー時刻 ${new Date(r.serverTime).toLocaleString('ja-JP')}\n`
+      + `未送信の記録: ${(await dbAll()).filter(p=>p.dirty).length}件`;
+  }catch(e){
+    el.textContent = '接続NG: ' + e.message + '\nURL: ' + GAS_URL.slice(0,60) + '…';
+  }
+};
+document.getElementById('mAlbum').onclick = ()=>{ location.href = ALBUM_URL; };
 document.getElementById('mExport').onclick = async ()=>{
   toast('書き出し中…');
   const out=[];
