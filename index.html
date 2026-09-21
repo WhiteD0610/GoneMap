@@ -249,7 +249,7 @@ textarea{min-height:76px;resize:vertical}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ===== ここにGASのWebアプリURL（/exec で終わるもの）を貼る =====
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbxd8Yh-H20xPp2Y_cTdQ4XCOZAbEOvWGZqSTgjCwYOMb1VSLIgcCrh5Kj0koQ1Ac0XcGw/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbx-j4R2WvIbrPzmpcMo2XtKJHKNEq5qOvsLpQvW17VhfZUHARSF9kf6Ttq_ew80tsr2cQ/exec';
 // 同期の合言葉（GAS側の SYNC_KEY と同じ文字列に。全端末で共通）
 const SYNC_KEY = '109344';
 // アルバムアプリ（album.html）の場所。別リポジトリなら完全なURLを書く
@@ -553,7 +553,7 @@ fileInput.onchange = async ()=>{
   toast('写真を処理中…');
   try{
     pendingPhoto = await resize(f,1400,.82);
-    pendingThumb = await resize(f,220,.78);
+    pendingThumb = await resize(f,180,.72);
     setPhotoPreview(URL.createObjectURL(pendingThumb));
   }catch(e){ toast('この画像は読み込めませんでした'); }
   fileInput.value='';
@@ -762,15 +762,29 @@ async function sync(){
       const p = upNow[i];
       setSync('busy',`写真を送信中 ${i+1}/${upNow.length}`);
       toast(`写真を送信中 ${i+1}/${upNow.length}`);
-      const r = await api('photo_put',{id:p.id, data: await b2d(p.photo)}, 60000);
-      p.photoId = r.fileId; await dbPut(p);
+      try{
+        const r = await api('photo_put',{id:p.id, data: await b2d(p.photo)}, 60000);
+        p.photoId = r.fileId; p.photoFail = 0; await dbPut(p);
+      }catch(err){
+        p.photoFail = (p.photoFail||0) + 1; await dbPut(p);
+        toast('写真の送信に失敗: '+err.message);
+        if(p.photoFail < 2) throw err;   // 2回目までは中断して原因を表示
+      }
     }
     setSync('busy','記録を送信中…');
     const payload=[];
+    const THUMB_LIMIT = 45000;   // スプレッドシートのセル上限(5万文字)に対する安全値
     for(const p of dirty){
-      if(p.photo && !p.photoId) continue;      // 写真未送信の分は次回まわし
+      // 写真が送れていない記録は次回まわし。ただし2回失敗したら本体だけ先に送る
+      if(p.photo && !p.photoId && (p.photoFail||0) < 2) continue;
+      let th = (await b2d(p.thumb))||'';
+      if(th.length > THUMB_LIMIT && p.thumb){            // 大きすぎるサムネは作り直す
+        try{ p.thumb = await resize(p.thumb,140,.62); await dbPut(p); dropUrl(p.id);
+             th = (await b2d(p.thumb))||''; }catch(_){ }
+        if(th.length > THUMB_LIMIT) th = '';
+      }
       payload.push({id:p.id,name:p.name,cat:p.cat,date:p.date,memo:p.memo,
-        lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:(await b2d(p.thumb))||'',mapUrl:p.mapUrl||'',
+        lat:p.lat,lng:p.lng,photoId:p.photoId||'',thumb:th,mapUrl:p.mapUrl||'',
         updatedAt:p.updatedAt,deleted:!!p.deleted});
     }
     const since=+localStorage.getItem('pm_since')||0;
@@ -795,10 +809,11 @@ async function sync(){
       const i=all.findIndex(x=>x.id===rec.id); if(i>=0) all[i]=rec; else all.push(rec); n++;
     }
     for(const p of dirty){ const cur=all.find(x=>x.id===p.id);
-      if(cur && cur.dirty && cur.updatedAt===p.updatedAt && !(cur.photo && !cur.photoId)){ cur.dirty=false; await dbPut(cur); } }
+      if(cur && cur.dirty && cur.updatedAt===p.updatedAt && !(cur.photo && !cur.photoId && (cur.photoFail||0)<2)){ cur.dirty=false; await dbPut(cur); } }
     localStorage.setItem('pm_since', res.serverTime);
     localStorage.setItem('pm_synced', Date.now());
     refresh(); setSync('ok','');
+    fillMissingThumbs();
     if(n) toast(`${n}件を他の端末から受信しました`);
     const rest = (await dbAll()).filter(p=>p.dirty).length;
     if(rest){ setSync('busy',`残り${rest}件を送信中…`); syncing=false; setTimeout(sync, 800); return; }
@@ -807,6 +822,28 @@ async function sync(){
     toast('同期に失敗: '+e.message);
   }finally{ syncing=false; }
 }
+// サムネが無く photoId だけある記録を、Driveから取り直してサムネを作る
+let filling=false;
+async function fillMissingThumbs(){
+  if(!GAS_URL || filling) return;
+  filling = true;
+  try{
+    const targets = (await dbAll()).filter(p=>!p.deleted && !p.thumb && p.photoId).slice(0,8);
+    for(const p of targets){
+      try{
+        const r = await api('photo_get',{fileId:p.photoId}, 45000);
+        const blob = await d2b(r.data);
+        if(!blob) continue;
+        p.photo = blob;
+        p.thumb = await resize(blob,180,.72);
+        await dbPut(p); dropUrl(p.id);
+        const i = all.findIndex(x=>x.id===p.id); if(i>=0) all[i]=p;
+      }catch(_){ }
+    }
+    if(targets.length){ refresh(); }
+  }finally{ filling=false; }
+}
+
 document.getElementById('btnSync').onclick = ()=>{
   if(!GAS_URL){ openSheet(document.getElementById('sheetMenu')); toast('同期は未設定です'); return; }
   sync(); toast('同期中…');
@@ -823,12 +860,21 @@ document.getElementById('mPing').onclick = async ()=>{
   if(!GAS_URL){ el.textContent = 'GAS_URL が空です。コード冒頭に /exec URL を貼ってください。'; return; }
   el.textContent = '接続を確認しています…';
   const t0 = Date.now();
+  const un = (await dbAll()).filter(p=>p.dirty).length;
   try{
-    const r = await api('ping',{},15000);
-    el.textContent = `接続OK（${Date.now()-t0}ms）／サーバー時刻 ${new Date(r.serverTime).toLocaleString('ja-JP')}\n`
-      + `未送信の記録: ${(await dbAll()).filter(p=>p.dirty).length}件`;
+    const r = await api('diag',{},20000);
+    const lines = [`接続OK（${Date.now()-t0}ms）／未送信 ${un}件`];
+    if(r.sheetError) lines.push('★シートに書き込めません: '+r.sheetError+
+      '\n→ GASエディタで関数 setup を1回実行し、アクセス権限を承認してください');
+    else lines.push(`シート「${r.sheetName}」に ${r.rows}件\n${r.sheetUrl}`);
+    if(r.folderError) lines.push('★Driveに書き込めません: '+r.folderError);
+    else if(r.folderName) lines.push(`写真フォルダ: ${r.folderName}`);
+    el.textContent = lines.join('\n');
   }catch(e){
-    el.textContent = '接続NG: ' + e.message + '\nURL: ' + GAS_URL.slice(0,60) + '…';
+    if(/unknown action/.test(e.message))
+      el.textContent = 'GASが古いバージョンのままです。\n「デプロイを管理 → 編集 → バージョン: 新バージョン → デプロイ」で更新してください。';
+    else
+      el.textContent = '接続NG: ' + e.message + '\nURL: ' + GAS_URL.slice(0,70) + '…';
   }
 };
 document.getElementById('mAlbum').onclick = ()=>{ location.href = ALBUM_URL; };
