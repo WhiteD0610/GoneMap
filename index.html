@@ -18,7 +18,7 @@
 html,body{height:100%;margin:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
   color:var(--text);background:var(--bg);overflow:hidden}
-#map{position:absolute;inset:0}
+#map{position:fixed;inset:0;z-index:0}
 
 /* ===== ヘッダー ===== */
 header{position:absolute;top:0;left:0;right:var(--panel);z-index:600;
@@ -75,6 +75,7 @@ header{position:absolute;top:0;left:0;right:var(--panel);z-index:600;
   visibility:hidden;pointer-events:none;
   max-height:72%;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
 .sheet.show{transform:translateY(0);visibility:visible;pointer-events:auto}
+.sheet:not(.show){display:none!important}
 .grip{width:44px;height:5px;background:#d1d1d6;border-radius:3px;margin:9px auto 4px;flex:0 0 auto;cursor:pointer}
 .sheet .body{overflow:auto;-webkit-overflow-scrolling:touch;padding:6px 16px 22px}
 .sheet h2{font-size:18px;margin:0 0 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;
@@ -305,6 +306,17 @@ let pendingPos=null, pendingPhoto=null, pendingThumb=null, pickResolve=null, cur
   map.on('click', e=>{ if(pickResolve) map.panTo(e.latlng); });
 
   buildCats(); buildFilter();
+  // 地図の描画領域がずれた場合に備えて常時追従
+  window.addEventListener('resize', ()=>fixMap());
+  window.addEventListener('orientationchange', ()=>fixMap(true));
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') fixMap(true); });
+  document.addEventListener('focusout', ()=>fixMap(true));   // キーボードが閉じた後
+  if(window.visualViewport){
+    visualViewport.addEventListener('resize', ()=>fixMap());
+    visualViewport.addEventListener('scroll', ()=>fixMap());
+  }
+  if(window.ResizeObserver) new ResizeObserver(()=>fixMap()).observe(document.body);
+  fixMap(true);
   all = await dbAll(); refresh();
   updateSyncInfo();
   if(GAS_URL){ sync(); window.addEventListener('focus',()=>sync());
@@ -313,6 +325,28 @@ let pendingPos=null, pendingPhoto=null, pendingThumb=null, pickResolve=null, cur
 })();
 
 function refresh(){ places = all.filter(p=>!p.deleted); render(); }
+
+/* 地図の実寸をpxで固定し、Leafletに再計算させる。
+   ソフトキーボード表示中は縮んだ高さを掴まないようスキップし、閉じた後に効かせる */
+let mapFixT = null;
+function keyboardOpen(){
+  const a = document.activeElement;
+  return !!(a && /INPUT|TEXTAREA|SELECT/.test(a.tagName));
+}
+function fixMap(force){
+  clearTimeout(mapFixT);
+  const run = ()=>{
+    if(!map) return;
+    if(keyboardOpen() && !force) return;
+    const el = document.getElementById('map');
+    const h = Math.round(window.innerHeight);
+    if(h > 200){ el.style.height = h+'px'; el.style.width = '100%'; }
+    try{ map.invalidateSize({pan:false}); }catch(_){}
+  };
+  // 閉じるアニメーションやキーボードの収納を待って複数回実行
+  [0,160,360,700].forEach(t=>setTimeout(run,t));
+  mapFixT = setTimeout(run,1200);
+}
 
 /* ===================== マーカー ===================== */
 function urlFor(p){
@@ -341,12 +375,12 @@ const mask = document.getElementById('mask');
 const sheets = ['sheetForm','sheetDetail','sheetList','sheetPaste','sheetMenu'].map(id=>document.getElementById(id));
 function openSheet(el){
   closeSheets(true); el.classList.add('show');
-  if(isPC()){ document.body.classList.add('panelopen'); setTimeout(()=>map.invalidateSize({pan:false}),290); }
+  if(isPC()){ document.body.classList.add('panelopen'); fixMap(true); }
   else mask.classList.add('show');
 }
 function closeSheets(keepPanel){
   mask.classList.remove('show'); sheets.forEach(s=>s.classList.remove('show'));
-  if(!keepPanel){ document.body.classList.remove('panelopen'); setTimeout(()=>map.invalidateSize({pan:false}),290); }
+  if(!keepPanel){ document.body.classList.remove('panelopen'); fixMap(true); }
 }
 function closeAll(){
   if(pickResolve) endPick(null);
